@@ -11,6 +11,14 @@ Data comes from [`nflreadpy`](https://github.com/nflverse/nflreadpy) (nflverse) 
 is staged in a local SQLite database (`nfl_qb.db`). Everything is computed with
 [Polars](https://pola.rs/).
 
+An interactive [Streamlit](https://streamlit.io/) dashboard (`dashboard.py`) explores
+the results — leaderboard, per-QB breakdown, and a cost-vs-performance value chart. See
+[§7 Dashboard](#7-dashboard).
+
+```bash
+uv run streamlit run dashboard.py
+```
+
 ---
 
 ## 1. Pipeline
@@ -311,11 +319,58 @@ performance variance. Consequences:
 
 ```
 main.py             end-to-end pipeline + CLI (--season, --skip-load, --min-attempts)
+dashboard.py        Streamlit dashboard over qb_performance + qb_value
 lib/
   load_qb_data.py   data pull + contract reduction
   grade_qb.py       grade_qb_performance, grade_qb_value, join_stats_and_grades, join_contracts_and_value
   sqlite.py         write_to_sqlite / upsert_season helpers (JSON-encode nested columns)
+docs/               dashboard screenshots used in this README
 nfl_qb.db           local SQLite store (git-ignored) -- holds qb_performance + qb_value
 ```
 
 Requires Python ≥ 3.14. Dependencies in `pyproject.toml` (`uv sync`).
+
+---
+
+## 7. Dashboard
+
+An interactive [Streamlit](https://streamlit.io/) app that reads `nfl_qb.db` (read-only)
+and presents the grades. Launch it with:
+
+```bash
+uv run streamlit run dashboard.py     # opens http://localhost:8501
+```
+
+It needs `nfl_qb.db` to already exist — run `python main.py --season <year>` for each
+season you want first (the DB ships git-ignored). A sidebar picks the **season** (grades
+are pool-relative *within* a season, so everything is scoped to one year) and offers a
+team filter and a "hide small-sample QBs" toggle.
+
+Four tabs:
+
+| Tab | What it shows |
+|---|---|
+| **Overview** | Season leaderboard with color-coded letter grades, top-performer / best-value KPIs, and the grade distribution. |
+| **Performance** | Pick a QB → radar of the six component z-scores vs the pool average, a 0–100 score gauge, and rank in the season. |
+| **Value** | The signature cost-vs-performance scatter: each QB's pay (x) against play (y), colored by value tier, with the fitted OLS market line. Points above the line beat their contract. Plus a value leaderboard. |
+| **Compare** | Select two or more QBs and compare their component z-scores side by side, with a grade + contract summary table. |
+
+### Screenshots
+
+> Placeholders — drop the PNGs into `docs/` (filenames below) and they render here.
+
+**Overview**
+
+![Overview leaderboard](docs/overview.png)
+
+**Performance deep-dive**
+
+![Performance deep-dive](docs/performance.png)
+
+**Value analysis**
+
+![Value analysis](docs/value.png)
+
+**Compare**
+
+![Compare QBs](docs/compare.png)
