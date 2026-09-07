@@ -357,8 +357,6 @@ Four tabs:
 
 ### Screenshots
 
-> Placeholders — drop the PNGs into `docs/` (filenames below) and they render here.
-
 **Overview**
 
 ![Overview leaderboard](docs/overview.png)
