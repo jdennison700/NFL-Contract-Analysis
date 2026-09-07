@@ -33,6 +33,16 @@ _GRADE_CUTS = [
     (-1.50, "D"),
 ]  # anything below the last cut is "F"
 
+# Contract-value tiers, checked high-to-low, on `value_resid` -- SDs of on-field
+# performance above (or below) what the QB's pay predicts. Anything below the last
+# cut is "Albatross".
+_VALUE_TIERS = [
+    (1.25, "Massive surplus"),
+    (0.50, "Bargain"),
+    (-0.50, "Fair"),
+    (-1.25, "Overpaid"),
+]
+
 
 def grade_qb_performance(
     qb_stats: pl.DataFrame,
@@ -111,11 +121,90 @@ def grade_qb_performance(
     metrics = metrics.with_columns(letter_grade=grade)
 
     out_cols = (
-        ["player_display_name", "recent_team", "games", "attempts", "small_sample"]
+        ["player_id", "player_display_name", "recent_team", "games", "attempts",
+         "small_sample"]
         + [f"z_{name}" for name in _DEFAULT_WEIGHTS]
         + ["composite_z", "score_0_100", "letter_grade"]
     )
     return metrics.select(out_cols).sort("composite_z", descending=True)
+
+
+def grade_qb_value(
+    perf_grades: pl.DataFrame,
+    contracts: pl.DataFrame,
+) -> pl.DataFrame:
+    """
+    Grade each QB's on-field performance against what he is paid.
+
+    Method: a "market-expectation residual". Both axes are standardized across the
+    joined pool -- performance (``composite_z`` from ``grade_qb_performance``) and
+    cost (``apy_cap_pct``, average per year as a share of the salary cap). A simple
+    OLS line is fit predicting performance from cost; ``value_resid`` is how many
+    SDs a QB's performance sits above (positive = beating his deal) or below that
+    pay-predicted line. Residuals are bucketed into value tiers.
+
+    Args:
+        perf_grades: Output of ``grade_qb_performance`` (needs ``player_id`` and
+            ``composite_z``).
+        contracts: QB contracts, one row per player, as in ``qb_contracts_2025``
+            (needs ``player_id`` and ``apy_cap_pct``).
+
+    Returns:
+        pl.DataFrame sorted by ``value_resid`` descending.
+    """
+    contract_cols = ["player_id", "apy", "apy_cap_pct", "year_signed", "years"]
+    joined = perf_grades.select(
+        "player_id", "player_display_name", "recent_team", "letter_grade",
+        "composite_z",
+    ).join(contracts.select(contract_cols), on="player_id", how="inner")
+
+    dropped = perf_grades.height - joined.height
+    if dropped:
+        missing = (
+            perf_grades.join(contracts, on="player_id", how="anti")
+            .get_column("player_display_name")
+            .to_list()
+        )
+        print(f"WARNING: {dropped} graded QB(s) had no contract match: {missing}")
+    if joined.height < 3:
+        raise ValueError(f"need >=3 QBs with a contract match, got {joined.height}")
+
+    joined = joined.with_columns(
+        perf_z=(pl.col("composite_z") - pl.col("composite_z").mean())
+        / pl.col("composite_z").std(),
+        cost_z=(pl.col("apy_cap_pct") - pl.col("apy_cap_pct").mean())
+        / pl.col("apy_cap_pct").std(),
+    )
+
+    # Simple OLS of perf_z on cost_z: slope = cov / var, intercept via the means.
+    stats = joined.select(
+        b=(
+            ((pl.col("cost_z") - pl.col("cost_z").mean())
+             * (pl.col("perf_z") - pl.col("perf_z").mean())).sum()
+            / ((pl.col("cost_z") - pl.col("cost_z").mean()) ** 2).sum()
+        ),
+        mean_cost=pl.col("cost_z").mean(),
+        mean_perf=pl.col("perf_z").mean(),
+    ).row(0, named=True)
+    b = stats["b"]
+    a = stats["mean_perf"] - b * stats["mean_cost"]
+
+    joined = joined.with_columns(
+        expected_perf_z=a + b * pl.col("cost_z")
+    ).with_columns(
+        value_resid=pl.col("perf_z") - pl.col("expected_perf_z")
+    )
+
+    tier = pl.lit("Albatross")
+    for cut, label in reversed(_VALUE_TIERS):
+        tier = pl.when(pl.col("value_resid") >= cut).then(pl.lit(label)).otherwise(tier)
+    joined = joined.with_columns(value_tier=tier)
+
+    return joined.select(
+        "player_id", "player_display_name", "recent_team", "letter_grade",
+        "composite_z", "apy", "apy_cap_pct", "year_signed", "years",
+        "perf_z", "cost_z", "expected_perf_z", "value_resid", "value_tier",
+    ).sort("value_resid", descending=True)
 
 
 if __name__ == "__main__":
@@ -123,11 +212,22 @@ if __name__ == "__main__":
     qb_stats = pl.read_database("SELECT * FROM qb_stats_2025", engine)
 
     graded = grade_qb_performance(qb_stats)
-
     write_to_sqlite(graded, "qb_performance_grades_2025")
 
     for row in graded.iter_rows(named=True):
         print(
             f"{row['letter_grade']:>2}  {row['composite_z']:+.2f}  "
             f"{row['player_display_name']} ({row['recent_team']})"
+        )
+
+    contracts = pl.read_database("SELECT * FROM qb_contracts_2025", engine)
+    value = grade_qb_value(graded, contracts)
+    write_to_sqlite(value, "qb_value_grades_2025")
+
+    print()
+    for row in value.iter_rows(named=True):
+        print(
+            f"{row['value_tier']:<15}  {row['value_resid']:+.2f}  "
+            f"{row['player_display_name']} ({row['recent_team']})  "
+            f"grade {row['letter_grade']}, {row['apy_cap_pct']:.1%} of cap"
         )
