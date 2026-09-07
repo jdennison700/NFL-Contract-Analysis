@@ -24,22 +24,30 @@ python main.py --skip-load     # reuse data already in nfl_qb.db (no nflverse pu
 python main.py --min-attempts 150   # widen the qualifying pool
 ```
 
-| Step | Code | Produces (SQLite table) |
+| Step | Code | Result |
 |---|---|---|
-| Load season stats + contracts | `load_qb_stats`, `load_player_contracts` (`lib/load_qb_data.py`) | `qb_stats_<yr>`, `qb_contracts_<yr>` |
-| Grade on-field performance | `grade_qb_performance` (`lib/grade_qb.py`) | `qb_performance_grades_<yr>` |
-| Grade performance vs contract value | `grade_qb_value` (`lib/grade_qb.py`) | `qb_value_grades_<yr>` |
+| Load season stats + contracts | `load_qb_stats`, `load_player_contracts` (`lib/load_qb_data.py`) | in-memory frames (not staged) |
+| Grade on-field performance, splice onto the stats | `grade_qb_performance` + `join_stats_and_grades` (`lib/grade_qb.py`) | `qb_performance` table |
+| Grade performance vs contract value, splice onto contracts | `grade_qb_value` + `join_contracts_and_value` (`lib/grade_qb.py`) | `qb_value` table |
+
+The pipeline writes exactly **two tables**: `qb_performance` (every `qb_stats`
+column plus the performance-grade columns) and `qb_value` (every contract column
+plus the contract-value-grade columns). Both carry a `season` column and span
+every season graded so far.
 
 The season is variable everywhere. `main.py` defaults to `DEFAULT_SEASON`
 (currently 2025) — override with `--season` on the CLI or `run(season=...)`.
-Every table name is suffixed with the season (`qb_stats_2024`, …), so seasons
-never collide in the DB.
+Re-running a season **upserts**: `upsert_season` deletes that season's rows and
+re-inserts them, leaving other seasons untouched, so 2020–2025 can be built up one
+run at a time. `--skip-load` re-grades a season straight from the rows already in
+`qb_performance` / `qb_value` (no nflverse pull).
 
 `main.run(season=DEFAULT_SEASON, skip_load=False, min_attempts=200)` is importable
-and returns the four frames keyed by table name.
+and returns `{"qb_performance": ..., "qb_value": ...}`.
 
-Each module also has its own `__main__` (with a local `SEASON = 2025`) for running
-a single step (`python -m lib.load_qb_data`, `python -m lib.grade_qb`).
+Each module also has its own `__main__` (with a local `SEASON = 2025`):
+`python -m lib.load_qb_data` smoke-tests the nflverse pull; `python -m lib.grade_qb`
+re-grades that season from the rows already in `qb_performance` / `qb_value`.
 
 ### 1.1 `load_qb_data.py`
 
@@ -58,12 +66,13 @@ a single step (`python -m lib.load_qb_data`, `python -m lib.grade_qb`).
 
 ### 1.2 Key columns used downstream
 
-`qb_stats_<yr>`: `player_id`, `player_display_name`, `recent_team`, `games`,
-`attempts`, `sacks_suffered`, `passing_epa`, `passing_cpoe`,
-`passing_interceptions`, `fumbles_lost_total`, `passing_first_downs`,
-`rushing_epa`.
+From the loaded stats frame (all of which land in `qb_performance`): `player_id`,
+`player_display_name`, `recent_team`, `games`, `attempts`, `sacks_suffered`,
+`passing_epa`, `passing_cpoe`, `passing_interceptions`, `fumbles_lost_total`,
+`passing_first_downs`, `rushing_epa`.
 
-`qb_contracts_<yr>`: `player_id`, `apy`, `apy_cap_pct`, `year_signed`, `years`.
+From the loaded contracts frame (all of which land in `qb_value`): `player_id`,
+`apy`, `apy_cap_pct`, `year_signed`, `years`.
 
 ---
 
@@ -161,12 +170,19 @@ Absolute cutoffs on `composite_z`, checked high → low (`_GRADE_CUTS`). This is
 | D  | −1.50 – −1.00 |
 | F  | < −1.50 |
 
-### 2.7 Output — `qb_performance_grades_<yr>`
+### 2.7 Output — `qb_performance` table
 
-`player_id`, `player_display_name`, `recent_team`, `games`, `attempts`,
-`small_sample`, `z_epa_per_db`, `z_cpoe`, `z_sack_rate`, `z_to_rate`, `z_fd_rate`,
+`grade_qb_performance` returns the grade columns `player_id`,
+`player_display_name`, `recent_team`, `games`, `attempts`, `small_sample`,
+`z_epa_per_db`, `z_cpoe`, `z_sack_rate`, `z_to_rate`, `z_fd_rate`,
 `z_rush_epa_pg`, `composite_z`, `score_0_100`, `letter_grade` — sorted by
 `composite_z` descending.
+
+`join_stats_and_grades` then inner-joins that onto the full stats frame on
+`player_id` (so only graded QBs survive) and `main.py` adds a `season` column
+before the upsert. The stored `qb_performance` table therefore holds **every
+`qb_stats` column** followed by `small_sample`, the six `z_*` columns,
+`composite_z`, `score_0_100`, `letter_grade`, `season`.
 
 ---
 
@@ -234,12 +250,17 @@ Absolute cutoffs on `value_resid`, high → low (`_VALUE_TIERS`):
 | Overpaid | −1.25 – −0.50 |
 | Albatross | < −1.25 |
 
-### 3.6 Output — `qb_value_grades_<yr>`
+### 3.6 Output — `qb_value` table
 
-`player_id`, `player_display_name`, `recent_team`, `letter_grade` (performance, for
-context), `composite_z`, `apy`, `apy_cap_pct`, `year_signed`, `years`, `perf_z`,
-`cost_z`, `expected_perf_z`, `value_resid`, `value_tier` — sorted by `value_resid`
-descending.
+`grade_qb_value` returns `player_id`, `player_display_name`, `recent_team`,
+`letter_grade` (performance, for context), `composite_z`, `apy`, `apy_cap_pct`,
+`year_signed`, `years`, `perf_z`, `cost_z`, `expected_perf_z`, `value_resid`,
+`value_tier` — sorted by `value_resid` descending.
+
+`join_contracts_and_value` then appends any remaining contract columns (`team`,
+`value`, `guaranteed`, the `inflated_*` figures, …) by joining back to the
+contracts frame on `player_id`, and `main.py` adds a `season` column before the
+upsert.
 
 ### 3.7 How to read it (2025 fit)
 
@@ -275,7 +296,9 @@ performance variance. Consequences:
 - **Single season, no opponent adjustment.** Grades reflect what happened, not
   context (schedule, supporting cast, weather, scheme).
 - **Pool-relative.** Every z-score is measured against that season's qualifying
-  starters, so grades are not directly comparable across seasons.
+  starters, so grades are not directly comparable across seasons — even though
+  `qb_performance` / `qb_value` now stack every season in one table, filter to a
+  single `season` before ranking.
 - **`summary_level="reg"`** — regular season only. Pass `"post"` to
   `load_qb_stats` for playoffs.
 - **Contract snapshot** is the deal in force during 2025; restructures and
@@ -290,9 +313,9 @@ performance variance. Consequences:
 main.py             end-to-end pipeline + CLI (--season, --skip-load, --min-attempts)
 lib/
   load_qb_data.py   data pull + contract reduction
-  grade_qb.py       grade_qb_performance, grade_qb_value
-  sqlite.py         write_to_sqlite helper (JSON-encodes nested columns)
-nfl_qb.db           local SQLite store (git-ignored)
+  grade_qb.py       grade_qb_performance, grade_qb_value, join_stats_and_grades, join_contracts_and_value
+  sqlite.py         write_to_sqlite / upsert_season helpers (JSON-encode nested columns)
+nfl_qb.db           local SQLite store (git-ignored) -- holds qb_performance + qb_value
 ```
 
 Requires Python ≥ 3.14. Dependencies in `pyproject.toml` (`uv sync`).

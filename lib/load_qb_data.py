@@ -1,8 +1,6 @@
 import polars as pl
 import nflreadpy as nfl
 
-from lib.sqlite import write_to_sqlite
-
 # Column families that carry no signal for quarterback analysis: receiving
 # production, defensive stats, kicking, punting, and return/special-teams work.
 _DROP_PREFIXES = ("receiving_", "def_", "fg_", "pat_", "gwfg_", "pt_")
@@ -108,11 +106,12 @@ def load_player_contracts(season: int) -> pl.DataFrame:
 
 
 if __name__ == "__main__":
-
+    # Smoke-test the nflverse pull. The pipeline (main.py) does not stage these
+    # frames -- they're spliced with their grades into qb_performance / qb_value.
     SEASON = 2025
 
     qb_stats = load_qb_stats(seasons=[SEASON])
     qb_contracts = load_player_contracts(SEASON)
 
-    write_to_sqlite(qb_stats, f"qb_stats_{SEASON}")
-    write_to_sqlite(qb_contracts, f"qb_contracts_{SEASON}")
+    print(f"qb_stats:     {qb_stats.shape}  {qb_stats.columns}")
+    print(f"qb_contracts: {qb_contracts.shape}  {qb_contracts.columns}")

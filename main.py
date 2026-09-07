@@ -6,9 +6,12 @@ End-to-end NFL QB grading pipeline.
     python main.py --skip-load    # reuse the data already in nfl_qb.db
 
 Steps:
-    1. pull season stats + contracts from nflverse           -> qb_stats_<yr>, qb_contracts_<yr>
-    2. grade on-field performance (A+..F)                    -> qb_performance_grades_<yr>
-    3. grade performance against contract value (tiers)      -> qb_value_grades_<yr>
+    1. pull season stats + contracts from nflverse
+    2. grade on-field performance (A+..F), splice onto the stats   -> qb_performance
+    3. grade performance vs contract value, splice onto contracts  -> qb_value
+
+Both tables carry a ``season`` column and span every season graded so far; a
+re-run replaces just that season's rows.
 """
 
 import argparse
@@ -16,9 +19,16 @@ import argparse
 import polars as pl
 import sqlalchemy as sa
 
-from lib.grade_qb import grade_qb_performance, grade_qb_value
+from lib.grade_qb import (
+    _PERF_GRADE_COLS,
+    _VALUE_GRADE_COLS,
+    grade_qb_performance,
+    grade_qb_value,
+    join_contracts_and_value,
+    join_stats_and_grades,
+)
 from lib.load_qb_data import load_player_contracts, load_qb_stats
-from lib.sqlite import DB_PATH, write_to_sqlite
+from lib.sqlite import DB_PATH, upsert_season
 
 # Season graded when none is given on the CLI or to run().
 DEFAULT_SEASON = 2025
@@ -49,45 +59,65 @@ def run(
     db_path: str = DB_PATH,
 ) -> dict[str, pl.DataFrame]:
     """
-    Run the whole pipeline and return the four resulting frames keyed by table name.
+    Run the whole pipeline and return the two resulting frames keyed by table name
+    (``qb_performance``, ``qb_value``).
 
     Args:
         season: NFL season to grade.
-        skip_load: reuse ``qb_stats_<season>`` / ``qb_contracts_<season>`` already
-            in the DB instead of pulling fresh from nflverse.
+        skip_load: reuse the season's rows already in ``qb_performance`` /
+            ``qb_value`` instead of pulling fresh from nflverse.
         min_attempts: passed through to ``grade_qb_performance``.
         db_path: SQLite file to read from / write to.
     """
     engine = sa.create_engine(f"sqlite:///{db_path}")
-    stats_table = f"qb_stats_{season}"
-    contracts_table = f"qb_contracts_{season}"
 
     if skip_load:
-        qb_stats = pl.read_database(f"SELECT * FROM {stats_table}", engine)
-        contracts = pl.read_database(f"SELECT * FROM {contracts_table}", engine)
+        if not sa.inspect(engine).has_table("qb_performance"):
+            raise RuntimeError(
+                f"no data for season {season}; run without --skip-load first"
+            )
+        prev_perf = pl.read_database(
+            "SELECT * FROM qb_performance WHERE season = :s",
+            engine,
+            execute_options={"parameters": {"s": season}},
+        )
+        prev_value = pl.read_database(
+            "SELECT * FROM qb_value WHERE season = :s",
+            engine,
+            execute_options={"parameters": {"s": season}},
+        )
+        if prev_perf.height == 0:
+            raise RuntimeError(
+                f"no data for season {season}; run without --skip-load first"
+            )
+        qb_stats = prev_perf.drop(
+            "season", *[c for c in _PERF_GRADE_COLS if c in prev_perf.columns]
+        )
+        contracts = prev_value.drop(
+            "season", *[c for c in _VALUE_GRADE_COLS if c in prev_value.columns]
+        )
     else:
         qb_stats = load_qb_stats(seasons=[season])
         contracts = load_player_contracts(season)
-        write_to_sqlite(qb_stats, stats_table, db_path)
-        write_to_sqlite(contracts, contracts_table, db_path)
 
     performance = grade_qb_performance(qb_stats, min_attempts=min_attempts)
-    write_to_sqlite(performance, f"qb_performance_grades_{season}", db_path)
-
     value = grade_qb_value(performance, contracts)
-    write_to_sqlite(value, f"qb_value_grades_{season}", db_path)
+
+    perf_out = join_stats_and_grades(qb_stats, performance).with_columns(
+        pl.lit(season).alias("season")
+    )
+    value_out = join_contracts_and_value(contracts, value).with_columns(
+        pl.lit(season).alias("season")
+    )
+    upsert_season(perf_out, "qb_performance", season, db_path)
+    upsert_season(value_out, "qb_value", season, db_path)
 
     print(f"\n=== {season} performance grades ===")
     _print_performance(performance)
     print(f"\n=== {season} contract-value grades ===")
     _print_value(value)
 
-    return {
-        stats_table: qb_stats,
-        contracts_table: contracts,
-        f"qb_performance_grades_{season}": performance,
-        f"qb_value_grades_{season}": value,
-    }
+    return {"qb_performance": perf_out, "qb_value": value_out}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -96,7 +126,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-load",
         action="store_true",
-        help="reuse data already in nfl_qb.db instead of pulling from nflverse",
+        help="re-grade the season's rows already in nfl_qb.db instead of pulling from nflverse",
     )
     parser.add_argument("--min-attempts", type=int, default=200)
     return parser.parse_args()

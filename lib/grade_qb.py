@@ -1,7 +1,37 @@
 import polars as pl
 import sqlalchemy as sa
 
-from lib.sqlite import DB_PATH, write_to_sqlite
+from lib.sqlite import DB_PATH, upsert_season
+
+# Columns `grade_qb_performance` adds on top of its `qb_stats` input. Used to
+# splice grades onto the stats frame (and to strip them back off when re-reading
+# the combined `qb_performance` table).
+_PERF_GRADE_COLS = [
+    "small_sample",
+    "z_epa_per_db",
+    "z_cpoe",
+    "z_sack_rate",
+    "z_to_rate",
+    "z_fd_rate",
+    "z_rush_epa_pg",
+    "composite_z",
+    "score_0_100",
+    "letter_grade",
+]
+
+# Columns `grade_qb_value` adds that don't come from the `contracts` frame. Used
+# to strip the grade back off when re-reading the combined `qb_value` table.
+_VALUE_GRADE_COLS = [
+    "player_display_name",
+    "recent_team",
+    "letter_grade",
+    "composite_z",
+    "perf_z",
+    "cost_z",
+    "expected_perf_z",
+    "value_resid",
+    "value_tier",
+]
 
 # Component weights for the composite. Keys are the derived-metric names built in
 # `grade_qb_performance`; values need not sum to 1.0 (they're re-normalized).
@@ -207,14 +237,64 @@ def grade_qb_value(
     ).sort("value_resid", descending=True)
 
 
+def join_stats_and_grades(
+    qb_stats: pl.DataFrame, perf_grades: pl.DataFrame
+) -> pl.DataFrame:
+    """
+    Splice the performance grade onto the stats frame: every ``qb_stats`` column
+    followed by the grade columns, one row per graded QB (inner join, so QBs
+    that did not qualify are dropped).
+    """
+    return qb_stats.join(
+        perf_grades.select(["player_id", *_PERF_GRADE_COLS]),
+        on="player_id",
+        how="inner",
+    )
+
+
+def join_contracts_and_value(
+    contracts: pl.DataFrame, value_grades: pl.DataFrame
+) -> pl.DataFrame:
+    """
+    Splice the contract-value grade onto the contract frame: the grade/tier
+    columns from ``grade_qb_value`` followed by any remaining ``contracts``
+    columns, one row per graded QB with a contract match.
+    """
+    extra = [c for c in contracts.columns if c not in value_grades.columns]
+    return value_grades.join(
+        contracts.select(["player_id", *extra]), on="player_id", how="left"
+    )
+
+
 if __name__ == "__main__":
+    # Re-grade a season already staged in the DB. The raw stats/contracts are
+    # recovered from the combined tables by stripping the grade columns, so this
+    # needs a prior `python main.py --season <SEASON>` run to have populated them.
     SEASON = 2025
 
     engine = sa.create_engine(f"sqlite:///{DB_PATH}")
-    qb_stats = pl.read_database(f"SELECT * FROM qb_stats_{SEASON}", engine)
+    prev_perf = pl.read_database(
+        "SELECT * FROM qb_performance WHERE season = :s",
+        engine,
+        execute_options={"parameters": {"s": SEASON}},
+    )
+    prev_value = pl.read_database(
+        "SELECT * FROM qb_value WHERE season = :s",
+        engine,
+        execute_options={"parameters": {"s": SEASON}},
+    )
+    qb_stats = prev_perf.drop(
+        "season", *[c for c in _PERF_GRADE_COLS if c in prev_perf.columns]
+    )
+    contracts = prev_value.drop(
+        "season", *[c for c in _VALUE_GRADE_COLS if c in prev_value.columns]
+    )
 
     graded = grade_qb_performance(qb_stats)
-    write_to_sqlite(graded, f"qb_performance_grades_{SEASON}")
+    performance = join_stats_and_grades(qb_stats, graded).with_columns(
+        pl.lit(SEASON).alias("season")
+    )
+    upsert_season(performance, "qb_performance", SEASON)
 
     for row in graded.iter_rows(named=True):
         print(
@@ -222,9 +302,11 @@ if __name__ == "__main__":
             f"{row['player_display_name']} ({row['recent_team']})"
         )
 
-    contracts = pl.read_database(f"SELECT * FROM qb_contracts_{SEASON}", engine)
     value = grade_qb_value(graded, contracts)
-    write_to_sqlite(value, f"qb_value_grades_{SEASON}")
+    value_out = join_contracts_and_value(contracts, value).with_columns(
+        pl.lit(SEASON).alias("season")
+    )
+    upsert_season(value_out, "qb_value", SEASON)
 
     print()
     for row in value.iter_rows(named=True):
