@@ -60,7 +60,7 @@ def grade_qb_performance(
 
     Args:
         qb_stats: One row per QB, as produced by ``load_qb_stats`` / the
-            ``qb_stats_2025`` table.
+            ``qb_stats_<season>`` table.
         min_attempts: Minimum pass attempts to be graded. The default (200) drops
             deep backups whose tiny samples would distort the pool mean/SD.
         weights: Optional override of component weights. Keys must be a subset of
@@ -146,7 +146,7 @@ def grade_qb_value(
     Args:
         perf_grades: Output of ``grade_qb_performance`` (needs ``player_id`` and
             ``composite_z``).
-        contracts: QB contracts, one row per player, as in ``qb_contracts_2025``
+        contracts: QB contracts, one row per player, as in ``qb_contracts_<season>``
             (needs ``player_id`` and ``apy_cap_pct``).
 
     Returns:
@@ -208,11 +208,13 @@ def grade_qb_value(
 
 
 if __name__ == "__main__":
+    SEASON = 2025
+
     engine = sa.create_engine(f"sqlite:///{DB_PATH}")
-    qb_stats = pl.read_database("SELECT * FROM qb_stats_2025", engine)
+    qb_stats = pl.read_database(f"SELECT * FROM qb_stats_{SEASON}", engine)
 
     graded = grade_qb_performance(qb_stats)
-    write_to_sqlite(graded, "qb_performance_grades_2025")
+    write_to_sqlite(graded, f"qb_performance_grades_{SEASON}")
 
     for row in graded.iter_rows(named=True):
         print(
@@ -220,9 +222,9 @@ if __name__ == "__main__":
             f"{row['player_display_name']} ({row['recent_team']})"
         )
 
-    contracts = pl.read_database("SELECT * FROM qb_contracts_2025", engine)
+    contracts = pl.read_database(f"SELECT * FROM qb_contracts_{SEASON}", engine)
     value = grade_qb_value(graded, contracts)
-    write_to_sqlite(value, "qb_value_grades_2025")
+    write_to_sqlite(value, f"qb_value_grades_{SEASON}")
 
     print()
     for row in value.iter_rows(named=True):

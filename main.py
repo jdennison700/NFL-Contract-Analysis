@@ -20,6 +20,9 @@ from lib.grade_qb import grade_qb_performance, grade_qb_value
 from lib.load_qb_data import load_player_contracts, load_qb_stats
 from lib.sqlite import DB_PATH, write_to_sqlite
 
+# Season graded when none is given on the CLI or to run().
+DEFAULT_SEASON = 2025
+
 
 def _print_performance(graded: pl.DataFrame) -> None:
     for row in graded.iter_rows(named=True):
@@ -39,7 +42,7 @@ def _print_value(value: pl.DataFrame) -> None:
 
 
 def run(
-    season: int = 2025,
+    season: int = DEFAULT_SEASON,
     *,
     skip_load: bool = False,
     min_attempts: int = 200,
@@ -64,7 +67,7 @@ def run(
         contracts = pl.read_database(f"SELECT * FROM {contracts_table}", engine)
     else:
         qb_stats = load_qb_stats(seasons=[season])
-        contracts = load_player_contracts()
+        contracts = load_player_contracts(season)
         write_to_sqlite(qb_stats, stats_table, db_path)
         write_to_sqlite(contracts, contracts_table, db_path)
 
@@ -89,7 +92,7 @@ def run(
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--season", type=int, default=2025)
+    parser.add_argument("--season", type=int, default=DEFAULT_SEASON)
     parser.add_argument(
         "--skip-load",
         action="store_true",

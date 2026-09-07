@@ -30,34 +30,40 @@ python main.py --min-attempts 150   # widen the qualifying pool
 | Grade on-field performance | `grade_qb_performance` (`lib/grade_qb.py`) | `qb_performance_grades_<yr>` |
 | Grade performance vs contract value | `grade_qb_value` (`lib/grade_qb.py`) | `qb_value_grades_<yr>` |
 
-`main.run(season=2025, skip_load=False, min_attempts=200)` is importable and
-returns the four frames keyed by table name.
+The season is variable everywhere. `main.py` defaults to `DEFAULT_SEASON`
+(currently 2025) — override with `--season` on the CLI or `run(season=...)`.
+Every table name is suffixed with the season (`qb_stats_2024`, …), so seasons
+never collide in the DB.
 
-Each module also has its own `__main__` for running a single step against 2025
-(`python -m lib.load_qb_data`, `python -m lib.grade_qb`).
+`main.run(season=DEFAULT_SEASON, skip_load=False, min_attempts=200)` is importable
+and returns the four frames keyed by table name.
+
+Each module also has its own `__main__` (with a local `SEASON = 2025`) for running
+a single step (`python -m lib.load_qb_data`, `python -m lib.grade_qb`).
 
 ### 1.1 `load_qb_data.py`
 
 - **`load_qb_stats(seasons, summary_level="reg")`** — `nfl.load_player_stats`
   filtered to `position == "QB"`, one row per QB for the season. Receiving,
   defensive, kicking, punting and return columns are dropped (no QB signal).
-- **`load_player_contracts()`** — `nfl.load_contracts` filtered to QBs, reduced to
-  **the one deal that governed each QB's 2025 season**:
-  - keep contracts whose `season_history` has a 2025 entry with `cap_number > 0`
-    (an actual cap charge, i.e. the deal was really on the books in 2025);
-  - `year_signed <= 2025` (a 2026 extension still lists 2025 in its duplicated
-    history — exclude it);
+- **`load_player_contracts(season)`** — `nfl.load_contracts` filtered to QBs,
+  reduced to **the one deal that governed each QB's `season`**:
+  - keep contracts whose `season_history` has a `season` entry with
+    `cap_number > 0` (an actual cap charge, i.e. the deal was really on the books
+    that year);
+  - `year_signed <= season` (a later extension still lists `season` in its
+    duplicated history — exclude it);
   - if a QB still has more than one, take the most recently signed.
   - `gsis_id` is renamed to `player_id` so it joins to `qb_stats` / the grades.
 
 ### 1.2 Key columns used downstream
 
-`qb_stats_2025`: `player_id`, `player_display_name`, `recent_team`, `games`,
+`qb_stats_<yr>`: `player_id`, `player_display_name`, `recent_team`, `games`,
 `attempts`, `sacks_suffered`, `passing_epa`, `passing_cpoe`,
 `passing_interceptions`, `fumbles_lost_total`, `passing_first_downs`,
 `rushing_epa`.
 
-`qb_contracts_2025`: `player_id`, `apy`, `apy_cap_pct`, `year_signed`, `years`.
+`qb_contracts_<yr>`: `player_id`, `apy`, `apy_cap_pct`, `year_signed`, `years`.
 
 ---
 
@@ -155,7 +161,7 @@ Absolute cutoffs on `composite_z`, checked high → low (`_GRADE_CUTS`). This is
 | D  | −1.50 – −1.00 |
 | F  | < −1.50 |
 
-### 2.7 Output — `qb_performance_grades_2025`
+### 2.7 Output — `qb_performance_grades_<yr>`
 
 `player_id`, `player_display_name`, `recent_team`, `games`, `attempts`,
 `small_sample`, `z_epa_per_db`, `z_cpoe`, `z_sack_rate`, `z_to_rate`, `z_fd_rate`,
@@ -228,7 +234,7 @@ Absolute cutoffs on `value_resid`, high → low (`_VALUE_TIERS`):
 | Overpaid | −1.25 – −0.50 |
 | Albatross | < −1.25 |
 
-### 3.6 Output — `qb_value_grades_2025`
+### 3.6 Output — `qb_value_grades_<yr>`
 
 `player_id`, `player_display_name`, `recent_team`, `letter_grade` (performance, for
 context), `composite_z`, `apy`, `apy_cap_pct`, `year_signed`, `years`, `perf_z`,
